@@ -516,8 +516,8 @@ if uploads:
             st.error("Nenhuma NF-e ficou elegível para o rateio com os filtros atuais.")
             st.stop()
 
-        if frete_total <= 0:
-            st.warning("Informe um valor de frete maior que zero para calcular.")
+        if frete_total is None or frete_total <= 0:
+            st.warning("Informe o valor total do frete para realizar o cálculo.")
             st.stop()
 
         calc["frete_rateado"] = allocate_total_by_weight(frete_total, calc["peso_bruto"].tolist())
