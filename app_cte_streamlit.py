@@ -541,7 +541,6 @@ st.markdown(
 with st.sidebar:
     st.markdown('<div class="sidebar-brand">🚚 Calculadora CT-e</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-sub">Rateio de frete por peso bruto</div>', unsafe_allow_html=True)
-    st.caption("Versão Cloud: 2.0 · exportação sem openpyxl")
     st.markdown("---")
     st.markdown("**Parâmetros**")
     origem_esperada = st.text_input("UF de origem", value="PE", max_chars=2).upper().strip()
