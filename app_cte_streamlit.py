@@ -82,22 +82,131 @@ def allocate_total_by_weight(total_value: float, weights):
 
 
 def excel_bytes(detail_df, city_df, total_frete, aliquota):
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        detail_df.to_excel(writer, sheet_name="Rateio por NF", index=False)
-        city_df.to_excel(writer, sheet_name="Resumo por cidade", index=False)
-        resumo = pd.DataFrame(
-            {
-                "Campo": ["Frete total", "Alíquota ICMS", "Peso bruto total", "Qtde NF-e"],
-                "Valor": [
-                    total_frete,
-                    aliquota,
-                    float(detail_df["Peso bruto (kg)"].sum()),
-                    int(len(detail_df)),
-                ],
-            }
+    """Gera um arquivo .xlsx sem depender de openpyxl/xlsxwriter.
+
+    Isso deixa o app compatível com o Streamlit Cloud mesmo quando essas
+    bibliotecas não estão instaladas no ambiente.
+    """
+    import zipfile
+    from xml.sax.saxutils import escape
+
+    resumo = pd.DataFrame(
+        {
+            "Campo": ["Frete total", "Alíquota ICMS", "Peso bruto total", "Qtde NF-e"],
+            "Valor": [
+                total_frete,
+                aliquota,
+                float(detail_df["Peso bruto (kg)"].sum()),
+                int(len(detail_df)),
+            ],
+        }
+    )
+
+    sheets = [
+        ("Rateio por NF", detail_df),
+        ("Resumo por cidade", city_df),
+        ("Resumo", resumo),
+    ]
+
+    def col_letter(n):
+        s = ""
+        while n:
+            n, rem = divmod(n - 1, 26)
+            s = chr(65 + rem) + s
+        return s
+
+    def cell_xml(ref, value):
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return f'<c r="{ref}" t="inlineStr"><is><t></t></is></c>'
+        if isinstance(value, bool):
+            return f'<c r="{ref}" t="b"><v>{1 if value else 0}</v></c>'
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return f'<c r="{ref}"><v>{value}</v></c>'
+        safe = escape(str(value))
+        return f'<c r="{ref}" t="inlineStr"><is><t>{safe}</t></is></c>'
+
+    def worksheet_xml(df):
+        rows = []
+        headers = list(df.columns)
+        header_cells = "".join(
+            cell_xml(f"{col_letter(i+1)}1", h) for i, h in enumerate(headers)
         )
-        resumo.to_excel(writer, sheet_name="Resumo", index=False)
+        rows.append(f'<row r="1">{header_cells}</row>')
+
+        for r_idx, row in enumerate(df.itertuples(index=False, name=None), start=2):
+            cells = "".join(
+                cell_xml(f"{col_letter(c_idx+1)}{r_idx}", value)
+                for c_idx, value in enumerate(row)
+            )
+            rows.append(f'<row r="{r_idx}">{cells}</row>')
+
+        return (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData>' + "".join(rows) + '</sheetData>'
+            '</worksheet>'
+        )
+
+    workbook_sheets = "".join(
+        f'<sheet name="{escape(name)}" sheetId="{i}" r:id="rId{i}"/>'
+        for i, (name, _) in enumerate(sheets, start=1)
+    )
+
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<sheets>{workbook_sheets}</sheets>'
+        '</workbook>'
+    )
+
+    workbook_rels = "".join(
+        f'<Relationship Id="rId{i}" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        f'Target="worksheets/sheet{i}.xml"/>'
+        for i in range(1, len(sheets) + 1)
+    )
+    workbook_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + workbook_rels +
+        '</Relationships>'
+    )
+
+    root_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="xl/workbook.xml"/>'
+        '</Relationships>'
+    )
+
+    overrides = "".join(
+        f'<Override PartName="/xl/worksheets/sheet{i}.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        for i in range(1, len(sheets) + 1)
+    )
+    content_types_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        + overrides +
+        '</Types>'
+    )
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types_xml)
+        zf.writestr("_rels/.rels", root_rels_xml)
+        zf.writestr("xl/workbook.xml", workbook_xml)
+        zf.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        for i, (_, df) in enumerate(sheets, start=1):
+            zf.writestr(f"xl/worksheets/sheet{i}.xml", worksheet_xml(df))
+
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -432,6 +541,7 @@ st.markdown(
 with st.sidebar:
     st.markdown('<div class="sidebar-brand">🚚 Calculadora CT-e</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-sub">Rateio de frete por peso bruto</div>', unsafe_allow_html=True)
+    st.caption("Versão Cloud: 2.0 · exportação sem openpyxl")
     st.markdown("---")
     st.markdown("**Parâmetros**")
     origem_esperada = st.text_input("UF de origem", value="PE", max_chars=2).upper().strip()
